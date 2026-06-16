@@ -1,6 +1,7 @@
 import anthropic
 import smtplib
 import json
+import re
 import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -8,9 +9,9 @@ from datetime import datetime
 
 # ── Config (set these as GitHub Secrets) ──────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-SENDER_EMAIL      = os.environ["SENDER_EMAIL"]       # Gmail address you send FROM
-SENDER_PASSWORD   = os.environ["SENDER_PASSWORD"]    # Gmail App Password (not your login password)
-RECIPIENT_EMAIL   = os.environ["RECIPIENT_EMAIL"]    # nicole@experienceolympia.com
+SENDER_EMAIL      = os.environ["SENDER_EMAIL"]
+SENDER_PASSWORD   = os.environ["SENDER_PASSWORD"]
+RECIPIENT_EMAIL   = os.environ["RECIPIENT_EMAIL"]
 # ──────────────────────────────────────────────────────────────────────────────
 
 def fetch_digest():
@@ -24,10 +25,10 @@ def fetch_digest():
         "specials, renovations, or expansions. "
         "Return ONLY a raw JSON object — no markdown, no backticks, no explanation — "
         "in this exact structure: "
-        '{\"openings\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],'
-        '\"closures\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],'
-        '\"new_offerings\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],'
-        '\"other\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}]} '
+        "{\"openings\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],"
+        "\"closures\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],"
+        "\"new_offerings\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],"
+        "\"other\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}]} "
         "Keep descriptions to 1-2 sentences. Use an empty array if no items in a category."
     )
 
@@ -38,16 +39,33 @@ def fetch_digest():
         messages=[{"role": "user", "content": prompt}]
     )
 
-    raw = "".join(b.text for b in response.content if hasattr(b, "text"))
-    # Strip any accidental markdown fences
-    raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-    return json.loads(raw)
+    # Extract all text blocks from the response (web search returns multiple blocks)
+    raw = ""
+    for block in response.content:
+        if hasattr(block, "text") and block.text:
+            raw += block.text
+
+    print("Raw Claude response:", raw[:500])  # helpful for debugging
+
+    # Strip markdown fences if present
+    raw = raw.strip()
+    raw = re.sub(r"^```json\s*", "", raw)
+    raw = re.sub(r"^```\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+    raw = raw.strip()
+
+    # Find the JSON object even if there's surrounding text
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON object found in response: {raw[:300]}")
+
+    return json.loads(match.group())
 
 
 def build_html(data, today):
     def section(title, items, empty_msg):
         if not items:
-            return f"<h3>{title}</h3><p style='color:#888'>{empty_msg}</p>"
+            return f"<h3 style='color:#333'>{title}</h3><p style='color:#888'>{empty_msg}</p>"
         rows = "".join(
             f"<div style='margin-bottom:12px'>"
             f"<strong>{i.get('name','')}</strong> — {i.get('description','')}"
@@ -55,11 +73,11 @@ def build_html(data, today):
             f"</div>"
             for i in items
         )
-        return f"<h3>{title}</h3>{rows}"
+        return f"<h3 style='color:#333'>{title}</h3>{rows}"
 
     body = f"""
     <div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px'>
-      <h2 style='margin-bottom:4px'>Thurston County Business Digest</h2>
+      <h2 style='margin-bottom:4px;color:#111'>Thurston County Business Digest</h2>
       <p style='color:#888;margin-top:0'>{today}</p>
       <hr style='border:none;border-top:1px solid #eee;margin:16px 0'>
       {section("New Openings", data.get("openings", []), "No new openings today.")}
