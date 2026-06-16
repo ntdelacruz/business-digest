@@ -3,61 +3,62 @@ import smtplib
 import json
 import re
 import os
+import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
 
-# ── Config (set these as GitHub Secrets) ──────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 SENDER_EMAIL      = os.environ["SENDER_EMAIL"]
 SENDER_PASSWORD   = os.environ["SENDER_PASSWORD"]
 RECIPIENT_EMAIL   = os.environ["RECIPIENT_EMAIL"]
-# ──────────────────────────────────────────────────────────────────────────────
 
 def fetch_digest():
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     today = datetime.now().strftime("%A, %B %-d, %Y")
 
+    # Shorter prompt = fewer input tokens = less likely to hit rate limit
     prompt = (
-        f"Today is {today}. Search the web for business news in Thurston County, "
-        "Washington (Olympia, Lacey, Tumwater, Yelm, and surrounding areas) from "
-        "the past 24 hours. Find: new business openings, closures, new menu items, "
-        "specials, renovations, or expansions. "
-        "Return ONLY a raw JSON object — no markdown, no backticks, no explanation — "
-        "in this exact structure: "
-        "{\"openings\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],"
-        "\"closures\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],"
-        "\"new_offerings\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}],"
-        "\"other\":[{\"name\":\"...\",\"description\":\"...\",\"source\":\"...\"}]} "
-        "Keep descriptions to 1-2 sentences. Use an empty array if no items in a category."
+        f"Today is {today}. Search for recent business news in Thurston County WA "
+        "(Olympia, Lacey, Tumwater, Yelm). Find: openings, closures, new menus, specials. "
+        "Reply with ONLY this JSON, no extra text:\n"
+        '{"openings":[{"name":"","description":"","source":""}],'
+        '"closures":[{"name":"","description":"","source":""}],'
+        '"new_offerings":[{"name":"","description":"","source":""}],'
+        '"other":[{"name":"","description":"","source":""}]}'
     )
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}],
-        messages=[{"role": "user", "content": prompt}]
-    )
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=1000,
+                tools=[{"type": "web_search_20250305", "name": "web_search"}],
+                messages=[{"role": "user", "content": prompt}]
+            )
+            break
+        except anthropic.RateLimitError:
+            if attempt < 2:
+                print(f"Rate limited, waiting 30s before retry {attempt + 2}/3...")
+                time.sleep(30)
+            else:
+                raise
 
-    # Extract all text blocks from the response (web search returns multiple blocks)
     raw = ""
     for block in response.content:
         if hasattr(block, "text") and block.text:
             raw += block.text
 
-    print("Raw Claude response:", raw[:500])  # helpful for debugging
+    print("Raw response:", raw[:300])
 
-    # Strip markdown fences if present
     raw = raw.strip()
     raw = re.sub(r"^```json\s*", "", raw)
     raw = re.sub(r"^```\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
-    raw = raw.strip()
 
-    # Find the JSON object even if there's surrounding text
     match = re.search(r'\{.*\}', raw, re.DOTALL)
     if not match:
-        raise ValueError(f"No JSON object found in response: {raw[:300]}")
+        raise ValueError(f"No JSON found in response: {raw[:300]}")
 
     return json.loads(match.group())
 
@@ -75,23 +76,22 @@ def build_html(data, today):
         )
         return f"<h3 style='color:#333'>{title}</h3>{rows}"
 
-    body = f"""
+    return f"""
     <div style='font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px'>
       <h2 style='margin-bottom:4px;color:#111'>Thurston County Business Digest</h2>
       <p style='color:#888;margin-top:0'>{today}</p>
       <hr style='border:none;border-top:1px solid #eee;margin:16px 0'>
-      {section("New Openings", data.get("openings", []), "No new openings today.")}
+      {section("🟢 New Openings", data.get("openings", []), "No new openings today.")}
       <hr style='border:none;border-top:1px solid #eee;margin:16px 0'>
-      {section("Closures", data.get("closures", []), "No closures today.")}
+      {section("🔴 Closures", data.get("closures", []), "No closures today.")}
       <hr style='border:none;border-top:1px solid #eee;margin:16px 0'>
-      {section("New Offerings &amp; Specials", data.get("new_offerings", []), "Nothing new today.")}
+      {section("✨ New Offerings & Specials", data.get("new_offerings", []), "Nothing new today.")}
       <hr style='border:none;border-top:1px solid #eee;margin:16px 0'>
-      {section("Other Business News", data.get("other", []), "Nothing else today.")}
+      {section("📰 Other Business News", data.get("other", []), "Nothing else today.")}
       <hr style='border:none;border-top:1px solid #eee;margin:16px 0'>
       <p style='font-size:12px;color:#aaa'>Powered by Claude + web search</p>
     </div>
     """
-    return body
 
 
 def send_email(html, today):
